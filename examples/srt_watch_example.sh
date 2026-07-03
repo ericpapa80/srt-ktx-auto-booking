@@ -2,12 +2,12 @@
 set -euo pipefail
 
 # Usage example:
-#   cp .env.example .env
-#   edit .env
+#   mkdir -p /Users/ldh/.config/srt-ktx-auto-booking
+#   cp .env.example /Users/ldh/.config/srt-ktx-auto-booking/.env
+#   edit /Users/ldh/.config/srt-ktx-auto-booking/.env
 #   python3 -m venv .venv
 #   source .venv/bin/activate
 #   pip install -r requirements.txt
-#   set -a && . ./.env && set +a
 #   bash examples/srt_watch_example.sh
 
 python3 scripts/srt_autobook_watcher.py \

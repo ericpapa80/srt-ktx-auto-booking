@@ -1,4 +1,5 @@
 SRTrain
 korail2
 pycryptodome
-requests
+requests<2.32
+urllib3<2

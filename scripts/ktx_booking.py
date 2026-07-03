@@ -13,6 +13,11 @@ import time
 from functools import reduce
 
 try:
+    from env_utils import default_env_candidates, load_env_candidates
+except ModuleNotFoundError:  # allow `python -m` / package-style imports in tests
+    from scripts.env_utils import default_env_candidates, load_env_candidates
+
+try:
     from Crypto.Cipher import AES
     from Crypto.Util.Padding import pad
 except ModuleNotFoundError as exc:
@@ -139,7 +144,6 @@ TRAIN_ID_FIELDS = (
     "dep_code",
     "arr_code",
 )
-
 
 def ensure_runtime_dependencies() -> None:
     missing: list[str] = []
@@ -663,13 +667,14 @@ def print_json(payload: dict[str, object]) -> None:
 
 def build_client() -> PatchedKorail:
     ensure_runtime_dependencies()
+    load_env_candidates(default_env_candidates())
     korail_id = os.environ.get("KSKILL_KTX_ID")
     korail_pw = os.environ.get("KSKILL_KTX_PASSWORD")
     if not korail_id or not korail_pw:
         raise SystemExit(
             "이 작업에는 KSKILL_KTX_ID, KSKILL_KTX_PASSWORD 환경변수가 필요합니다. "
-            "환경변수가 설정되어 있지 않으면 ~/.config/k-skill/secrets.env 에 추가하거나 "
-            "에이전트의 secret vault에서 주입해 주세요."
+            "/Users/ldh/.config/srt-ktx-auto-booking/.env 에 추가하거나 "
+            "셸 환경변수로 주입해 주세요."
         )
     client = PatchedKorail(korail_id, korail_pw)
     if not client.logined:

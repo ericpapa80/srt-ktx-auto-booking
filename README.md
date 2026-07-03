@@ -11,6 +11,8 @@ K-Skill 기반 자산을 바탕으로 정리한 SRT / KTX 예약 도구 모음�
 ## 포함 파일
 - `scripts/ktx_booking.py` : KTX CLI
 - `scripts/srt_autobook_watcher.py` : SRT watcher
+- `scripts/srt_watchctl.py` : SRT watcher 시작/상태/중지 컨트롤러
+- `scripts/env_utils.py` : `.env` 자동 로더
 - `.env.example` : 환경변수 예시
 - `examples/` : 실행 예시 스크립트
 
@@ -34,7 +36,10 @@ pip install -r requirements.txt
 
 ### 2. 환경변수 설정
 ```bash
-cp .env.example .env
+mkdir -p /Users/ldh/.config/srt-ktx-auto-booking
+chmod 700 /Users/ldh/.config/srt-ktx-auto-booking
+cp .env.example /Users/ldh/.config/srt-ktx-auto-booking/.env
+chmod 600 /Users/ldh/.config/srt-ktx-auto-booking/.env
 ```
 
 필수:
@@ -46,17 +51,19 @@ cp .env.example .env
 선택:
 - `TELEGRAM_BOT_TOKEN`
 - `TELEGRAM_CHAT_ID`
+- `OPENCLAW_NOTIFY_TARGET`
+- `OPENCLAW_NOTIFY_CHANNEL`
+- `OPENCLAW_NOTIFY_ACCOUNT`
 
 bash / zsh:
 ```bash
-set -a
-. ./.env
-set +a
+# 이제 스크립트가 /Users/ldh/.config/srt-ktx-auto-booking/.env 를 자동으로 먼저 읽습니다.
+# 필요하면 여전히 수동 export 도 가능합니다.
 ```
 
 PowerShell:
 ```powershell
-Get-Content .env | ForEach-Object {
+Get-Content /Users/ldh/.config/srt-ktx-auto-booking/.env | ForEach-Object {
   if ($_ -match '^(\s*#|\s*$)') { return }
   $name, $value = $_ -split '=', 2
   [System.Environment]::SetEnvironmentVariable($name.Trim(), $value.Trim(), 'Process')
@@ -69,6 +76,12 @@ Get-Content .env | ForEach-Object {
 ```bash
 python3 scripts/ktx_booking.py search 서울 부산 20260328 090000 --limit 5
 ```
+
+`ktx_booking.py` 는 다음 순서로 자격증명을 찾습니다.
+- 현재 셸 환경변수
+- `/Users/ldh/.config/srt-ktx-auto-booking/.env`
+- 프로젝트 루트의 `.env`
+- 기존 호환용 `~/.config/k-skill/secrets.env`
 
 좌석 없음 / 대기 포함:
 ```bash
@@ -104,6 +117,31 @@ bash examples/ktx_reservations_example.sh
 
 ## SRT 사용법
 
+### 추천: 백그라운드 감시 시작
+`/Users/ldh/.config/srt-ktx-auto-booking/.env`에 `KSKILL_SRT_ID`, `KSKILL_SRT_PASSWORD`, `OPENCLAW_NOTIFY_TARGET`을 넣으면 별도 Telegram bot token 없이 OpenClaw로 알림을 보낼 수 있습니다.
+
+```bash
+.venv/bin/python scripts/srt_watchctl.py start \
+  --name suseo-daejeon-20260508 \
+  --dep 수서 \
+  --arr 대전 \
+  --date 20260508 \
+  --start-time 200000 \
+  --end-time 205959 \
+  --poll-seconds 20 \
+  --notify openclaw
+```
+
+상태 확인:
+```bash
+.venv/bin/python scripts/srt_watchctl.py status
+```
+
+중지:
+```bash
+.venv/bin/python scripts/srt_watchctl.py stop --name suseo-daejeon-20260508
+```
+
 ### 기본 실행
 ```bash
 python3 scripts/srt_autobook_watcher.py \
@@ -118,6 +156,9 @@ python3 scripts/srt_autobook_watcher.py \
   --seat-preference general-first \
   --notify stdout
 ```
+
+`srt_autobook_watcher.py` 도 현재 셸 환경변수 외에 `/Users/ldh/.config/srt-ktx-auto-booking/.env` 를 먼저 읽습니다.
+필요하면 `--secrets-path`로 다른 env 파일을 지정할 수 있습니다.
 
 ### 특정 열차만 감시
 ```bash
@@ -151,6 +192,22 @@ python3 scripts/srt_autobook_watcher.py \
   --telegram-chat-id <CHAT_ID>
 ```
 
+### OpenClaw Telegram 알림
+```bash
+python3 scripts/srt_autobook_watcher.py \
+  --state-dir ./state/srt-suseo-daejeon-20260508 \
+  --dep 수서 \
+  --arr 대전 \
+  --date 20260508 \
+  --start-time 200000 \
+  --end-time 205959 \
+  --mode target-total \
+  --poll-seconds 20 \
+  --seat-preference general-first \
+  --notify openclaw \
+  --openclaw-target telegram:<CHAT_ID>
+```
+
 예시:
 ```bash
 bash examples/srt_watch_example.sh
@@ -178,3 +235,4 @@ watcher 는 `state.json` 을 갱신합니다.
 - `.env`, `state/`, 로그 파일은 저장소에 포함하지 마세요.
 - KTX 예약은 항상 최신 `search` 결과의 `train_id` 를 사용하세요.
 - 같은 조건의 SRT watcher 를 여러 개 동시에 실행하지 마세요.
+- macOS 기본 Python(특히 LibreSSL 기반)에서는 최신 `urllib3` 경고가 날 수 있어 `requirements.txt` 에 호환 버전을 고정했습니다.

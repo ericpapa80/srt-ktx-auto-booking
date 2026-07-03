@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 import argparse
+import itertools
 import json
 import os
 import signal
+import subprocess
 import sys
 import time
 import traceback
@@ -19,8 +21,13 @@ from SRT.passenger import Adult
 from SRT.reservation import SRTReservation
 from SRT.train import SRTTrain
 
+try:
+    from env_utils import SHARED_ENV_PATH, default_env_candidates, load_env_candidates
+except ModuleNotFoundError:  # allow `python -m` / package-style imports in tests
+    from scripts.env_utils import SHARED_ENV_PATH, default_env_candidates, load_env_candidates
 
-DEFAULT_SECRETS_PATH = Path.home() / ".config" / "k-skill" / "secrets.env"
+
+DEFAULT_SECRETS_PATH = SHARED_ENV_PATH
 
 
 @dataclass
@@ -30,10 +37,29 @@ class TrainSnapshot:
     arr_time: str
     general_seat_state: str | None
     special_seat_state: str | None
+    reserve_wait_possible_code: str | None
     seat_available: bool
     general_seat_available: bool
     special_seat_available: bool
     reserve_standby_available: bool
+
+
+def parse_poll_sequence(value: str) -> list[int]:
+    intervals: list[int] = []
+    for raw in value.split(","):
+        item = raw.strip()
+        if not item:
+            continue
+        try:
+            seconds = int(item)
+        except ValueError as exc:
+            raise argparse.ArgumentTypeError(f"invalid poll interval value: {item!r}") from exc
+        if seconds <= 0:
+            raise argparse.ArgumentTypeError("poll interval values must be positive seconds")
+        intervals.append(seconds)
+    if not intervals:
+        raise argparse.ArgumentTypeError("at least one poll interval value is required")
+    return intervals
 
 
 def now_iso() -> str:
@@ -52,6 +78,53 @@ def payment_deadline_text(reservation: SRTReservation) -> str:
     if reservation.paid:
         return "이미 결제됨"
     return f"{reservation.payment_date[4:6]}월 {reservation.payment_date[6:8]}일 {reservation.payment_time[0:2]}:{reservation.payment_time[2:4]}"
+
+
+def raw_payment_deadline_text(reservation: SRTReservation) -> str:
+    if reservation.paid:
+        return "이미 결제됨"
+    return f"{reservation.payment_date} {reservation.payment_time}"
+
+
+def booking_success_message(
+    service_name: str,
+    reservation: SRTReservation,
+    reserved_total: int | None,
+    continuous: bool,
+) -> str:
+    total = int(reserved_total or 1)
+    tail = "중지 요청을 받을 때까지 1석 예약을 계속 시도하겠습니다." if continuous else "결제 후 예약 상태를 확인해 주세요."
+    return (
+        f"{service_name} 자동예약 성공: {yyyymmdd_to_kr(reservation.dep_date)} "
+        f"{reservation.dep_station_name}→{reservation.arr_station_name} "
+        f"{hhmmss_to_hhmm(reservation.dep_time)} 출발 {reservation.train_number}열차 "
+        f"일반실 1석을 예약했습니다. 현재 이 열차 누적 예약 좌석은 {total}석입니다. "
+        f"구입기한은 {raw_payment_deadline_text(reservation)}이니 결제해 주세요. "
+        f"{tail}"
+    )
+
+
+def standby_available_message(service_name: str, train: SRTTrain, *, apply_enabled: bool = False) -> str:
+    tail = (
+        "자동으로 예약대기 신청을 시도하겠습니다."
+        if apply_enabled
+        else "일반석은 아직 매진일 수 있으며, 예약대기 신청은 별도 요청 시 진행하겠습니다."
+    )
+    return (
+        f"{service_name} 예약대기 가능 감지: {yyyymmdd_to_kr(train.dep_date)} "
+        f"{train.dep_station_name}→{train.arr_station_name} "
+        f"{hhmmss_to_hhmm(train.dep_time)} 출발 {train.train_number}열차가 예약대기 가능 상태로 바뀌었습니다. "
+        f"{tail}"
+    )
+
+
+def standby_success_message(service_name: str, reservation: SRTReservation) -> str:
+    return (
+        f"{service_name} 예약대기 신청 성공: {yyyymmdd_to_kr(reservation.dep_date)} "
+        f"{reservation.dep_station_name}→{reservation.arr_station_name} "
+        f"{hhmmss_to_hhmm(reservation.dep_time)} 출발 {reservation.train_number}열차 예약대기를 신청했습니다. "
+        "좌석 배정/결제 안내가 오면 SRT 앱 또는 홈페이지에서 확인해 주세요."
+    )
 
 
 def atomic_write_text(path: Path, content: str) -> None:
@@ -74,26 +147,6 @@ def read_json(path: Path) -> dict[str, Any]:
         return {}
 
 
-def parse_env_file(path: Path) -> dict[str, str]:
-    env: dict[str, str] = {}
-    if not path.exists():
-        return env
-    text = path.read_text(encoding="utf-8", errors="replace").replace("\r", "")
-    for raw_line in text.splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        if line.startswith("export "):
-            line = line[len("export ") :].strip()
-        key, value = line.split("=", 1)
-        key = key.strip()
-        value = value.strip()
-        if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
-            value = value[1:-1]
-        env[key] = value
-    return env
-
-
 class Watcher:
     def __init__(self, args: argparse.Namespace) -> None:
         self.args = args
@@ -106,6 +159,9 @@ class Watcher:
         self._client: Optional[SRT] = None
         self._terminated = False
         self._loop_count = int(self.state.get("loop_count", 0) or 0)
+        self._consecutive_errors = 0
+        self._poll_interval_cycle = itertools.cycle(args.poll_sequence)
+        self._poll_sequence_label = ",".join(str(value) for value in args.poll_sequence)
 
     def log(self, message: str) -> None:
         print(f"[{now_iso()}] {message}", flush=True)
@@ -123,7 +179,10 @@ class Watcher:
             "target_dep_time": self.args.target_dep_time,
             "mode": self.args.mode,
             "poll_seconds": self.args.poll_seconds,
+            "poll_sequence": self.args.poll_sequence,
             "seat_preference": self.args.seat_preference,
+            "standby_action": self.args.standby_action,
+            "standby_phone": bool(self.args.standby_phone),
             "notify": self.args.notify,
             "telegram_chat_id": self.args.telegram_chat_id,
             "secrets_path": str(self.args.secrets_path),
@@ -138,13 +197,38 @@ class Watcher:
         return self._terminated or self.stop_path.exists()
 
     def load_credentials(self) -> None:
-        env_from_file = parse_env_file(self.args.secrets_path)
-        for key, value in env_from_file.items():
-            os.environ.setdefault(key, value)
+        candidates = []
+        explicit = Path(self.args.secrets_path)
+        if explicit not in candidates:
+            candidates.append(explicit)
+        for path in default_env_candidates():
+            if path not in candidates:
+                candidates.append(path)
+
+        loaded = load_env_candidates(candidates)
 
         missing = [key for key in ("KSKILL_SRT_ID", "KSKILL_SRT_PASSWORD") if not os.environ.get(key)]
         if missing:
-            raise RuntimeError(f"missing SRT credentials: {', '.join(missing)}")
+            searched = ", ".join(str(path) for path in candidates)
+            loaded_text = ", ".join(str(path) for path in loaded) if loaded else "없음"
+            raise RuntimeError(
+                f"missing SRT credentials: {', '.join(missing)}; searched={searched}; loaded={loaded_text}"
+            )
+
+    def validate_notify_config(self) -> None:
+        if self.args.notify == "telegram":
+            token = os.environ.get("TELEGRAM_BOT_TOKEN")
+            chat_id = self.args.telegram_chat_id or os.environ.get("TELEGRAM_CHAT_ID")
+            missing = []
+            if not token:
+                missing.append("TELEGRAM_BOT_TOKEN")
+            if not chat_id:
+                missing.append("TELEGRAM_CHAT_ID or --telegram-chat-id")
+            if missing:
+                raise RuntimeError(f"missing Telegram notification config: {', '.join(missing)}")
+        if self.args.notify == "openclaw" and not (self.args.openclaw_target or os.environ.get("OPENCLAW_NOTIFY_TARGET")):
+            raise RuntimeError("missing OpenClaw notification config: OPENCLAW_NOTIFY_TARGET or --openclaw-target")
+
 
     def get_client(self) -> SRT:
         if self._client is None:
@@ -163,6 +247,11 @@ class Watcher:
             "special-only": SeatType.SPECIAL_ONLY,
         }[self.args.seat_preference]
 
+    @staticmethod
+    def normalize_train_number(value: Any) -> str:
+        text = str(value or "").strip()
+        return text.lstrip("0") or text
+
     def match_reservation(self, reservation: SRTReservation) -> bool:
         if reservation.dep_date != self.args.date:
             return False
@@ -170,7 +259,7 @@ class Watcher:
             return False
         if not (self.args.start_time <= reservation.dep_time <= self.args.end_time):
             return False
-        if self.args.target_train_number and reservation.train_number != self.args.target_train_number:
+        if self.args.target_train_number and self.normalize_train_number(reservation.train_number) != self.normalize_train_number(self.args.target_train_number):
             return False
         if self.args.target_dep_time and reservation.dep_time != self.args.target_dep_time:
             return False
@@ -219,6 +308,7 @@ class Watcher:
                     arr_time=train.arr_time,
                     general_seat_state=getattr(train, "general_seat_state", None),
                     special_seat_state=getattr(train, "special_seat_state", None),
+                    reserve_wait_possible_code=getattr(train, "reserve_wait_possible_code", None),
                     seat_available=train.seat_available(),
                     general_seat_available=train.general_seat_available(),
                     special_seat_available=train.special_seat_available(),
@@ -254,6 +344,46 @@ class Watcher:
                 return train
         return None
 
+    def choose_standby_train(self, trains: list[SRTTrain]) -> Optional[SRTTrain]:
+        for train in trains:
+            if train.reserve_standby_available():
+                return train
+        return None
+
+    def notify_standby_available(self, train: SRTTrain) -> None:
+        raw_code = getattr(train, "reserve_wait_possible_code", None)
+        key = f"{train.dep_date}:{train.train_number}:{train.dep_time}:{raw_code}"
+        if self.state.get("last_standby_notification_key") == key:
+            return
+
+        message = standby_available_message("SRT", train, apply_enabled=self.args.standby_action == "apply")
+        ok, detail = self.notify(message)
+        self.save_state(
+            last_standby_notification_key=key,
+            last_standby_notification_at=now_iso(),
+            last_standby_notification_ok=ok,
+            last_standby_notification_detail=detail,
+            last_standby_notification_message=message,
+            last_standby_snapshot=asdict(
+                TrainSnapshot(
+                    train_number=train.train_number,
+                    dep_time=train.dep_time,
+                    arr_time=train.arr_time,
+                    general_seat_state=getattr(train, "general_seat_state", None),
+                    special_seat_state=getattr(train, "special_seat_state", None),
+                    reserve_wait_possible_code=raw_code,
+                    seat_available=train.seat_available(),
+                    general_seat_available=train.general_seat_available(),
+                    special_seat_available=train.special_seat_available(),
+                    reserve_standby_available=train.reserve_standby_available(),
+                )
+            ),
+        )
+        if ok:
+            self.log(f"standby notification recorded for train {train.train_number}: {detail}")
+        else:
+            self.log(f"standby notification failed for train {train.train_number}: {detail}")
+
     def send_telegram(self, text: str) -> tuple[bool, str]:
         token = os.environ.get("TELEGRAM_BOT_TOKEN")
         chat_id = self.args.telegram_chat_id or os.environ.get("TELEGRAM_CHAT_ID")
@@ -265,27 +395,50 @@ class Watcher:
             return True, resp.text[:500]
         return False, f"HTTP {resp.status_code}: {resp.text[:500]}"
 
+    def send_openclaw(self, text: str) -> tuple[bool, str]:
+        target = self.args.openclaw_target or os.environ.get("OPENCLAW_NOTIFY_TARGET")
+        if not target:
+            return False, "OPENCLAW_NOTIFY_TARGET missing"
+
+        channel = self.args.openclaw_channel or os.environ.get("OPENCLAW_NOTIFY_CHANNEL") or "telegram"
+        account = self.args.openclaw_account or os.environ.get("OPENCLAW_NOTIFY_ACCOUNT")
+        openclaw_bin = os.environ.get("OPENCLAW_BIN") or "openclaw"
+
+        cmd = [
+            openclaw_bin,
+            "message",
+            "send",
+            "--channel",
+            channel,
+            "--target",
+            target,
+            "--message",
+            text,
+            "--json",
+        ]
+        if account:
+            cmd.extend(["--account", account])
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        except Exception as exc:
+            return False, str(exc)
+        detail = ((proc.stdout or "") + (proc.stderr or "")).strip()
+        if proc.returncode == 0:
+            return True, detail[:500] or "sent"
+        return False, detail[:500] or f"openclaw exited {proc.returncode}"
+
     def notify(self, text: str) -> tuple[bool, str]:
         if self.args.notify == "stdout":
             self.log(f"NOTIFY: {text}")
             return True, "stdout"
         if self.args.notify == "telegram":
             return self.send_telegram(text)
+        if self.args.notify == "openclaw":
+            return self.send_openclaw(text)
         return False, f"unknown notify mode: {self.args.notify}"
 
     def notify_booking(self, reservation: SRTReservation, continuous: bool = False, reserved_total: int | None = None) -> None:
-        if continuous:
-            message = (
-                f"SRT 자동예약 성공: {yyyymmdd_to_kr(reservation.dep_date)} {reservation.dep_station_name}→{reservation.arr_station_name} "
-                f"{hhmmss_to_hhmm(reservation.dep_time)} 출발 {reservation.train_number}열차 1석 예약 완료. "
-                f"현재 누적 예약 좌석 {reserved_total}석. 구입기한 {payment_deadline_text(reservation)}"
-            )
-        else:
-            message = (
-                f"SRT 자동예약 완료: {yyyymmdd_to_kr(reservation.dep_date)} {reservation.dep_station_name}→{reservation.arr_station_name} "
-                f"{hhmmss_to_hhmm(reservation.dep_time)} 출발 {reservation.train_number}열차 예약 완료. "
-                f"요금 {reservation.total_cost}원, 구입기한 {payment_deadline_text(reservation)}"
-            )
+        message = booking_success_message("SRT", reservation, reserved_total, continuous)
         ok, detail = self.notify(message)
         self.save_state(
             last_notification_at=now_iso(),
@@ -296,15 +449,50 @@ class Watcher:
         if not ok:
             raise RuntimeError(f"notification failed: {detail}")
 
+    def notify_standby_application(self, reservation: SRTReservation) -> None:
+        message = standby_success_message("SRT", reservation)
+        ok, detail = self.notify(message)
+        self.save_state(
+            last_standby_application_notification_at=now_iso(),
+            last_standby_application_notification_ok=ok,
+            last_standby_application_notification_detail=detail,
+            last_standby_application_notification_message=message,
+        )
+        if not ok:
+            raise RuntimeError(f"standby application notification failed: {detail}")
+
+    def apply_standby(self, client: SRT, train: SRTTrain) -> SRTReservation:
+        kwargs: dict[str, Any] = {
+            "passengers": [Adult(1)],
+            "special_seat": self.seat_preference(),
+        }
+        if self.args.standby_phone:
+            kwargs["mblPhone"] = self.args.standby_phone
+        return client.reserve_standby(train, **kwargs)
+
     def run(self) -> int:
         signal.signal(signal.SIGTERM, self.handle_signal)
         signal.signal(signal.SIGINT, self.handle_signal)
         self.pid_path.write_text(str(os.getpid()), encoding="utf-8")
-        self.save_state(status="starting", started_at=self.state.get("started_at") or now_iso())
+        self.save_state(status="starting", stop_reason=None, pid=os.getpid(), started_at=self.state.get("started_at") or now_iso())
         self.log(
             f"watcher started for {self.args.date} {self.args.dep}->{self.args.arr} {self.args.start_time}-{self.args.end_time}, "
-            f"poll={self.args.poll_seconds}s, mode={self.args.mode}"
+            f"poll_sequence={self._poll_sequence_label}s, mode={self.args.mode}"
         )
+        try:
+            self.load_credentials()
+            self.validate_notify_config()
+        except Exception as exc:
+            detail = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__)).strip()
+            self.log(detail)
+            self.save_state(
+                status="blocked",
+                stop_reason="startup_validation_failed",
+                last_error=str(exc),
+                last_error_detail=detail,
+                last_error_at=now_iso(),
+            )
+            return 2
 
         while not self.should_stop():
             self._loop_count += 1
@@ -327,6 +515,7 @@ class Watcher:
                     last_snapshot_at=now_iso(),
                     train_count=len(trains),
                 )
+                self._consecutive_errors = 0
 
                 if self.args.mode == "target-total" and existing:
                     self.log(f"matching reservation already exists: {existing[0].reservation_number}")
@@ -355,20 +544,52 @@ class Watcher:
                     self.save_state(status="done", stop_reason="reserved_and_notified")
                     return 0
 
-                time.sleep(self.args.poll_seconds)
+                standby_train = self.choose_standby_train(trains)
+                if standby_train is not None:
+                    if self.args.standby_action == "apply":
+                        self.log(
+                            f"reserve standby detected on train {standby_train.train_number} at "
+                            f"{hhmmss_to_hhmm(standby_train.dep_time)}; attempting standby application"
+                        )
+                        reservation = self.apply_standby(client, standby_train)
+                        self.log(f"standby application succeeded: {reservation.reservation_number}")
+                        self.notify_standby_application(reservation)
+                        self.save_state(
+                            status="done",
+                            stop_reason="standby_applied_and_notified",
+                            last_standby_application_at=now_iso(),
+                            last_standby_application_reservation=self.reservations_payload([reservation])[0],
+                        )
+                        return 0
+
+                    self.log(
+                        f"reserve standby detected on train {standby_train.train_number} at "
+                        f"{hhmmss_to_hhmm(standby_train.dep_time)}; notifying only"
+                    )
+                    self.notify_standby_available(standby_train)
+
+                sleep_seconds = next(self._poll_interval_cycle)
+                self.save_state(next_poll_seconds=sleep_seconds)
+                self.log(f"sleeping {sleep_seconds}s before next poll")
+                time.sleep(sleep_seconds)
             except Exception as exc:
-                detail = "".join(traceback.format_exception(exc)).strip()
+                detail = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__)).strip()
                 self.reset_client()
+                self._consecutive_errors += 1
+                backoff = int(min(300 * (1.5 ** (self._consecutive_errors - 1)), 600))
+                self.log(f"error #{self._consecutive_errors}; backing off {backoff}s")
                 self.log(detail)
                 self.save_state(
                     status="error_retrying",
                     last_error=str(exc),
                     last_error_detail=detail,
                     last_error_at=now_iso(),
+                    consecutive_errors=self._consecutive_errors,
+                    next_backoff_seconds=backoff,
                 )
                 if self.should_stop():
                     break
-                time.sleep(min(max(self.args.poll_seconds, 15), 60))
+                time.sleep(backoff)
 
         self.save_state(status="stopped", stop_reason="stop_requested")
         self.log("watcher stopped")
@@ -386,14 +607,30 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--target-train-number")
     parser.add_argument("--target-dep-time")
     parser.add_argument("--mode", choices=["target-total", "continuous-single"], default="target-total")
-    parser.add_argument("--poll-seconds", type=int, default=20)
-    parser.add_argument("--notify", choices=["stdout", "telegram"], default="stdout")
+    parser.add_argument(
+        "--poll-sequence",
+        type=parse_poll_sequence,
+        default=parse_poll_sequence("7,14,20,17,13,10,16,21,26,15,23"),
+        help="Comma-separated polling intervals in seconds, repeated cyclically. Default: 7,14,20,17,13,10,16,21,26,15,23",
+    )
+    parser.add_argument("--poll-seconds", type=int, default=60, help="Deprecated; poll-sequence is used for normal watch polling")
+    parser.add_argument("--notify", choices=["stdout", "telegram", "openclaw"], default="stdout")
     parser.add_argument("--telegram-chat-id")
+    parser.add_argument("--openclaw-target")
+    parser.add_argument("--openclaw-channel", default="telegram")
+    parser.add_argument("--openclaw-account", default="default")
     parser.add_argument(
         "--seat-preference",
         default="general-first",
         choices=["general-first", "general-only", "special-first", "special-only"],
     )
+    parser.add_argument(
+        "--standby-action",
+        choices=["notify", "apply"],
+        default="notify",
+        help="What to do when 예약대기 becomes available: notify only (default) or apply for standby.",
+    )
+    parser.add_argument("--standby-phone", help="Optional mobile phone number passed to SRT.reserve_standby().")
     parser.add_argument("--secrets-path", type=Path, default=DEFAULT_SECRETS_PATH)
     return parser
 

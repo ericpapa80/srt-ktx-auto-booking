@@ -1,7 +1,12 @@
 .env
 .venv/
+.venv.*/
 venv/
-__pycache__/
-*.pyc
+.omc/
+.pytest_cache/
+logs/
 state/
 *.log
+__pycache__/
+*.py[cod]
+.DS_Store
