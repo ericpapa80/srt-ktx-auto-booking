@@ -36,10 +36,10 @@ pip install -r requirements.txt
 
 ### 2. 환경변수 설정
 ```bash
-mkdir -p /Users/ldh/.config/srt-ktx-auto-booking
-chmod 700 /Users/ldh/.config/srt-ktx-auto-booking
-cp .env.example /Users/ldh/.config/srt-ktx-auto-booking/.env
-chmod 600 /Users/ldh/.config/srt-ktx-auto-booking/.env
+mkdir -p ~/.config/srt-ktx-auto-booking
+chmod 700 ~/.config/srt-ktx-auto-booking
+cp .env.example ~/.config/srt-ktx-auto-booking/.env
+chmod 600 ~/.config/srt-ktx-auto-booking/.env
 ```
 
 필수:
@@ -57,13 +57,13 @@ chmod 600 /Users/ldh/.config/srt-ktx-auto-booking/.env
 
 bash / zsh:
 ```bash
-# 이제 스크립트가 /Users/ldh/.config/srt-ktx-auto-booking/.env 를 자동으로 먼저 읽습니다.
+# 이제 스크립트가 ~/.config/srt-ktx-auto-booking/.env 를 자동으로 먼저 읽습니다.
 # 필요하면 여전히 수동 export 도 가능합니다.
 ```
 
 PowerShell:
 ```powershell
-Get-Content /Users/ldh/.config/srt-ktx-auto-booking/.env | ForEach-Object {
+Get-Content ~/.config/srt-ktx-auto-booking/.env | ForEach-Object {
   if ($_ -match '^(\s*#|\s*$)') { return }
   $name, $value = $_ -split '=', 2
   [System.Environment]::SetEnvironmentVariable($name.Trim(), $value.Trim(), 'Process')
@@ -79,7 +79,7 @@ python3 scripts/ktx_booking.py search 서울 부산 20260328 090000 --limit 5
 
 `ktx_booking.py` 는 다음 순서로 자격증명을 찾습니다.
 - 현재 셸 환경변수
-- `/Users/ldh/.config/srt-ktx-auto-booking/.env`
+- `~/.config/srt-ktx-auto-booking/.env`
 - 프로젝트 루트의 `.env`
 - 기존 호환용 `~/.config/k-skill/secrets.env`
 
@@ -118,7 +118,7 @@ bash examples/ktx_reservations_example.sh
 ## SRT 사용법
 
 ### 추천: 백그라운드 감시 시작
-`/Users/ldh/.config/srt-ktx-auto-booking/.env`에 `KSKILL_SRT_ID`, `KSKILL_SRT_PASSWORD`, `OPENCLAW_NOTIFY_TARGET`을 넣으면 별도 Telegram bot token 없이 OpenClaw로 알림을 보낼 수 있습니다.
+`~/.config/srt-ktx-auto-booking/.env`에 `KSKILL_SRT_ID`, `KSKILL_SRT_PASSWORD`, `OPENCLAW_NOTIFY_TARGET`을 넣으면 별도 Telegram bot token 없이 OpenClaw로 알림을 보낼 수 있습니다.
 
 ```bash
 .venv/bin/python scripts/srt_watchctl.py start \
@@ -157,7 +157,7 @@ python3 scripts/srt_autobook_watcher.py \
   --notify stdout
 ```
 
-`srt_autobook_watcher.py` 도 현재 셸 환경변수 외에 `/Users/ldh/.config/srt-ktx-auto-booking/.env` 를 먼저 읽습니다.
+`srt_autobook_watcher.py` 도 현재 셸 환경변수 외에 `~/.config/srt-ktx-auto-booking/.env` 를 먼저 읽습니다.
 필요하면 `--secrets-path`로 다른 env 파일을 지정할 수 있습니다.
 
 ### 특정 열차만 감시

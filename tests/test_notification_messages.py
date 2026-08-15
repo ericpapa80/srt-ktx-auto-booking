@@ -142,3 +142,91 @@ def test_srt_match_reservation_normalizes_leading_zero_train_numbers(tmp_path):
     )
 
     assert srt_watcher.Watcher(args).match_reservation(DummyReservation())
+
+
+def test_srt_match_train_normalizes_leading_zero_train_numbers(tmp_path):
+    class DummyTrain:
+        dep_time = "222000"
+        train_number = "00372"
+
+    args = Namespace(
+        state_dir=str(tmp_path),
+        dep="대전",
+        arr="수서",
+        date="20260624",
+        start_time="220000",
+        end_time="223000",
+        target_train_number="372",
+        target_dep_time=None,
+        mode="target-total",
+        poll_seconds=60,
+        poll_sequence=[7],
+        seat_preference="general-first",
+        standby_action="notify",
+        standby_phone=None,
+        notify="stdout",
+        telegram_chat_id=None,
+        openclaw_target=None,
+        openclaw_channel="telegram",
+        openclaw_account="default",
+        secrets_path=Path("dummy.env"),
+    )
+
+    assert srt_watcher.Watcher(args).match_train(DummyTrain())
+
+
+def test_srt_standby_notification_failure_can_retry(tmp_path):
+    class DummyTrain:
+        dep_date = "20260624"
+        dep_station_name = "대전"
+        arr_station_name = "수서"
+        dep_time = "222000"
+        train_number = "00372"
+        arr_time = "230000"
+        general_seat_state = "매진"
+        special_seat_state = "매진"
+        reserve_wait_possible_code = "Y"
+
+        def seat_available(self):
+            return False
+
+        def general_seat_available(self):
+            return False
+
+        def special_seat_available(self):
+            return False
+
+        def reserve_standby_available(self):
+            return True
+
+    args = Namespace(
+        state_dir=str(tmp_path),
+        dep="대전",
+        arr="수서",
+        date="20260624",
+        start_time="220000",
+        end_time="223000",
+        target_train_number="372",
+        target_dep_time=None,
+        mode="target-total",
+        poll_seconds=60,
+        poll_sequence=[7],
+        seat_preference="general-first",
+        standby_action="notify",
+        standby_phone=None,
+        notify="stdout",
+        telegram_chat_id=None,
+        openclaw_target=None,
+        openclaw_channel="telegram",
+        openclaw_account="default",
+        secrets_path=Path("dummy.env"),
+    )
+    watcher = srt_watcher.Watcher(args)
+    notifications = []
+    watcher.notify = lambda message: (notifications.append(message) or (False, "temporary failure"))
+
+    watcher.notify_standby_available(DummyTrain())
+    watcher.notify_standby_available(DummyTrain())
+
+    assert len(notifications) == 2
+    assert "last_standby_notification_key" not in watcher.state

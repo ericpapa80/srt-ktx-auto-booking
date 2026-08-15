@@ -193,6 +193,14 @@ class Watcher:
         self._terminated = True
         self.save_state(status="stopped", stop_reason=f"signal:{signum}")
 
+    def finish(self, *, status: str, stop_reason: str, **updates: Any) -> None:
+        self.save_state(status=status, stop_reason=stop_reason, pid=None, **updates)
+        try:
+            if self.pid_path.exists() and self.pid_path.read_text(encoding="utf-8").strip() == str(os.getpid()):
+                self.pid_path.unlink()
+        except OSError:
+            pass
+
     def should_stop(self) -> bool:
         return self._terminated or self.stop_path.exists()
 
@@ -268,7 +276,7 @@ class Watcher:
     def match_train(self, train: SRTTrain) -> bool:
         if not (self.args.start_time <= train.dep_time <= self.args.end_time):
             return False
-        if self.args.target_train_number and train.train_number != self.args.target_train_number:
+        if self.args.target_train_number and self.normalize_train_number(train.train_number) != self.normalize_train_number(self.args.target_train_number):
             return False
         if self.args.target_dep_time and train.dep_time != self.args.target_dep_time:
             return False
@@ -358,13 +366,12 @@ class Watcher:
 
         message = standby_available_message("SRT", train, apply_enabled=self.args.standby_action == "apply")
         ok, detail = self.notify(message)
-        self.save_state(
-            last_standby_notification_key=key,
-            last_standby_notification_at=now_iso(),
-            last_standby_notification_ok=ok,
-            last_standby_notification_detail=detail,
-            last_standby_notification_message=message,
-            last_standby_snapshot=asdict(
+        updates: dict[str, Any] = {
+            "last_standby_notification_at": now_iso(),
+            "last_standby_notification_ok": ok,
+            "last_standby_notification_detail": detail,
+            "last_standby_notification_message": message,
+            "last_standby_snapshot": asdict(
                 TrainSnapshot(
                     train_number=train.train_number,
                     dep_time=train.dep_time,
@@ -378,7 +385,10 @@ class Watcher:
                     reserve_standby_available=train.reserve_standby_available(),
                 )
             ),
-        )
+        }
+        if ok:
+            updates["last_standby_notification_key"] = key
+        self.save_state(**updates)
         if ok:
             self.log(f"standby notification recorded for train {train.train_number}: {detail}")
         else:
@@ -485,7 +495,7 @@ class Watcher:
         except Exception as exc:
             detail = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__)).strip()
             self.log(detail)
-            self.save_state(
+            self.finish(
                 status="blocked",
                 stop_reason="startup_validation_failed",
                 last_error=str(exc),
@@ -518,8 +528,21 @@ class Watcher:
                 self._consecutive_errors = 0
 
                 if self.args.mode == "target-total" and existing:
+                    if self.state.get("last_notification_ok") is False and self.state.get("last_notification_message"):
+                        self.log(f"retrying booking notification for existing reservation {existing[0].reservation_number}")
+                        self.notify_booking(existing[0], continuous=False, reserved_total=reserved_total)
+                        self.finish(status="done", stop_reason="existing_reservation_notified")
+                        return 0
+                    if (
+                        self.state.get("last_standby_application_notification_ok") is False
+                        and self.state.get("last_standby_application_notification_message")
+                    ):
+                        self.log(f"retrying standby notification for existing reservation {existing[0].reservation_number}")
+                        self.notify_standby_application(existing[0])
+                        self.finish(status="done", stop_reason="existing_standby_notified")
+                        return 0
                     self.log(f"matching reservation already exists: {existing[0].reservation_number}")
-                    self.save_state(status="done", stop_reason="existing_reservation")
+                    self.finish(status="done", stop_reason="existing_reservation")
                     return 0
 
                 target_train = self.choose_bookable_train(trains)
@@ -541,7 +564,7 @@ class Watcher:
                         continue
 
                     self.notify_booking(reservation, continuous=False)
-                    self.save_state(status="done", stop_reason="reserved_and_notified")
+                    self.finish(status="done", stop_reason="reserved_and_notified")
                     return 0
 
                 standby_train = self.choose_standby_train(trains)
@@ -554,7 +577,7 @@ class Watcher:
                         reservation = self.apply_standby(client, standby_train)
                         self.log(f"standby application succeeded: {reservation.reservation_number}")
                         self.notify_standby_application(reservation)
-                        self.save_state(
+                        self.finish(
                             status="done",
                             stop_reason="standby_applied_and_notified",
                             last_standby_application_at=now_iso(),
@@ -591,7 +614,7 @@ class Watcher:
                     break
                 time.sleep(backoff)
 
-        self.save_state(status="stopped", stop_reason="stop_requested")
+        self.finish(status="stopped", stop_reason="stop_requested")
         self.log("watcher stopped")
         return 0
 

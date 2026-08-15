@@ -47,7 +47,13 @@ except ModuleNotFoundError as exc:
     _KORAIL_IMPORT_ERROR = exc
 
     class KorailError(Exception):
-        pass
+        def __init__(self, msg: str, code: str | None = None):
+            super().__init__(msg)
+            self.msg = msg
+            self.code = code
+
+        def __str__(self) -> str:
+            return f"{self.msg} ({self.code})" if self.code else self.msg
 
     class NeedToLoginError(KorailError):
         pass
@@ -673,7 +679,7 @@ def build_client() -> PatchedKorail:
     if not korail_id or not korail_pw:
         raise SystemExit(
             "이 작업에는 KSKILL_KTX_ID, KSKILL_KTX_PASSWORD 환경변수가 필요합니다. "
-            "/Users/ldh/.config/srt-ktx-auto-booking/.env 에 추가하거나 "
+            "~/.config/srt-ktx-auto-booking/.env 에 추가하거나 "
             "셸 환경변수로 주입해 주세요."
         )
     client = PatchedKorail(korail_id, korail_pw)
@@ -746,7 +752,8 @@ def command_cancel(args: argparse.Namespace) -> None:
     match = next((reservation for reservation in reservations if reservation.rsv_id == args.reservation_id), None)
     if match is None:
         raise SystemExit(f"reservation {args.reservation_id} not found")
-    client.cancel(match)
+    if not client.cancel(match):
+        raise KorailError(f"failed to cancel reservation {args.reservation_id}", "CANCEL_FAILED")
     print_json({"cancelled": True, "reservation_id": args.reservation_id})
 
 

@@ -54,18 +54,15 @@ def train_matches(train, args: argparse.Namespace) -> bool:
 
 
 def existing_matching_reservation(client, args: argparse.Namespace):
-    try:
-        for r in client.reservations():
-            if (
-                getattr(r, "train_no", None) == args.train_no
-                and getattr(r, "dep_name", None) == args.dep
-                and getattr(r, "arr_name", None) == args.arr
-                and getattr(r, "dep_date", None) == args.date
-                and getattr(r, "dep_time", None) == args.dep_time
-            ):
-                return r
-    except Exception as exc:  # read-only guard; do not fail watcher startup solely on list issue
-        print(f"{ts()} WARN reservation_precheck_failed type={type(exc).__name__} msg={exc}", flush=True)
+    for r in client.reservations():
+        if (
+            getattr(r, "train_no", None) == args.train_no
+            and getattr(r, "dep_name", None) == args.dep
+            and getattr(r, "arr_name", None) == args.arr
+            and getattr(r, "dep_date", None) == args.date
+            and getattr(r, "dep_time", None) == args.dep_time
+        ):
+            return r
     return None
 
 
@@ -97,12 +94,6 @@ def main() -> int:
     client = kb.build_client()
     passengers = kb.parse_passengers(args)
 
-    preexisting = existing_matching_reservation(client, args)
-    if preexisting is not None:
-        payload = kb.normalize_reservation(preexisting)
-        print(f"{ts()} RESERVATION_ALREADY_EXISTS " + json.dumps(payload, ensure_ascii=False), flush=True)
-        return 0
-
     print(
         f"{ts()} WATCH_STARTED dep={args.dep} arr={args.arr} date={args.date} "
         f"dep_time={args.dep_time} train_no={args.train_no} interval_sequence={interval_label}s seat=general-only adults={args.adults}",
@@ -113,6 +104,19 @@ def main() -> int:
     consecutive_errors = 0
     while True:
         loop += 1
+        try:
+            preexisting = existing_matching_reservation(client, args)
+        except Exception as exc:
+            print(
+                f"{ts()} ERROR reservation_precheck_failed type={type(exc).__name__} msg={exc}",
+                flush=True,
+            )
+            return 2
+        if preexisting is not None:
+            payload = kb.normalize_reservation(preexisting)
+            print(f"{ts()} RESERVATION_ALREADY_EXISTS " + json.dumps(payload, ensure_ascii=False), flush=True)
+            return 0
+
         try:
             trains = client.search_train(
                 args.dep,

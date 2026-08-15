@@ -5,6 +5,7 @@ import argparse
 import json
 import os
 import re
+import shutil
 import signal
 import subprocess
 import sys
@@ -13,34 +14,16 @@ from pathlib import Path
 from typing import Any
 
 try:
-    from env_utils import SHARED_ENV_PATH
+    from env_utils import SHARED_ENV_PATH, parse_env_file
 except ModuleNotFoundError:  # allow package-style imports in tests
-    from scripts.env_utils import SHARED_ENV_PATH
+    from scripts.env_utils import SHARED_ENV_PATH, parse_env_file
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 WATCHER = REPO_ROOT / "scripts" / "srt_autobook_watcher.py"
 DEFAULT_ENV_PATH = SHARED_ENV_PATH
 DEFAULT_STATE_ROOT = REPO_ROOT / "state"
-
-
-def parse_env_file(path: Path) -> dict[str, str]:
-    env: dict[str, str] = {}
-    if not path.exists():
-        return env
-    text = path.read_text(encoding="utf-8", errors="replace").replace("\r", "")
-    for raw_line in text.splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        if line.startswith("export "):
-            line = line[len("export ") :].strip()
-        key, value = line.split("=", 1)
-        value = value.strip()
-        if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
-            value = value[1:-1]
-        env[key.strip()] = value
-    return env
+ACTIVE_STATUSES = {"starting", "watching", "error_retrying"}
 
 
 def read_json(path: Path) -> dict[str, Any]:
@@ -80,6 +63,28 @@ def pid_alive(pid: int | None) -> bool:
     return True
 
 
+def process_is_watcher(pid: int) -> bool | None:
+    """Return whether pid belongs to this watcher, or None if it cannot be checked."""
+    if sys.platform == "win32":
+        powershell = shutil.which("powershell") or shutil.which("pwsh")
+        if not powershell:
+            return None
+        command = f'(Get-CimInstance Win32_Process -Filter "ProcessId = {pid}").CommandLine'
+        cmd = [powershell, "-NoProfile", "-NonInteractive", "-Command", command]
+    else:
+        cmd = ["ps", "-p", str(pid), "-o", "args="]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    command_line = (result.stdout or "").strip().lower()
+    if not command_line:
+        return None
+    return str(WATCHER).lower() in command_line or WATCHER.name.lower() in command_line
+
+
 def safe_name(value: str) -> str:
     value = re.sub(r"[^A-Za-z0-9_.-]+", "-", value).strip("-")
     return value or "srt-watch"
@@ -105,10 +110,21 @@ def command_start(args: argparse.Namespace) -> int:
     state_dir = state_dir_for(args)
     state_dir.mkdir(parents=True, exist_ok=True)
     state = read_json(state_dir / "state.json")
-    pid = int(state.get("pid") or read_pid(state_dir / "watcher.pid") or 0) or None
-    if pid_alive(pid):
-        print_json({"started": False, "reason": "already_running", "pid": pid, "state_dir": str(state_dir)})
-        return 0
+    pid = None
+    if state.get("status") in ACTIVE_STATUSES:
+        pid = int(state.get("pid") or read_pid(state_dir / "watcher.pid") or 0) or None
+    if pid and pid_alive(pid):
+        identity = process_is_watcher(pid)
+        if identity is None:
+            print_json({"started": False, "reason": "process_identity_unknown", "pid": pid, "state_dir": str(state_dir)})
+            return 1
+        if identity:
+            print_json({"started": False, "reason": "already_running", "pid": pid, "state_dir": str(state_dir)})
+            return 0
+
+    stop_flag = state_dir / "stop.flag"
+    if stop_flag.exists():
+        stop_flag.unlink()
 
     env = os.environ.copy()
     if sys.platform == "darwin" and Path("/opt/homebrew/opt/expat/lib").is_dir():
@@ -231,9 +247,12 @@ def command_stop(args: argparse.Namespace) -> int:
     state_dir = state_root / safe_name(args.name)
     state_dir.mkdir(parents=True, exist_ok=True)
     (state_dir / "stop.flag").write_text(datetime.now().astimezone().isoformat(timespec="seconds"), encoding="utf-8")
-    pid = read_pid(state_dir / "watcher.pid")
+    state = read_json(state_dir / "state.json")
+    pid = None
+    if state.get("status") in ACTIVE_STATUSES:
+        pid = int(state.get("pid") or read_pid(state_dir / "watcher.pid") or 0) or None
     signalled = False
-    if pid_alive(pid):
+    if pid and pid_alive(pid) and process_is_watcher(pid) is True:
         os.kill(pid, signal.SIGTERM)
         signalled = True
     print_json({"stop_requested": True, "pid": pid, "signalled": signalled, "state_dir": str(state_dir)})

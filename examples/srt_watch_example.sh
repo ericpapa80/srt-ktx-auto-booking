@@ -2,9 +2,9 @@
 set -euo pipefail
 
 # Usage example:
-#   mkdir -p /Users/ldh/.config/srt-ktx-auto-booking
-#   cp .env.example /Users/ldh/.config/srt-ktx-auto-booking/.env
-#   edit /Users/ldh/.config/srt-ktx-auto-booking/.env
+#   mkdir -p ~/.config/srt-ktx-auto-booking
+#   cp .env.example ~/.config/srt-ktx-auto-booking/.env
+#   edit ~/.config/srt-ktx-auto-booking/.env
 #   python3 -m venv .venv
 #   source .venv/bin/activate
 #   pip install -r requirements.txt

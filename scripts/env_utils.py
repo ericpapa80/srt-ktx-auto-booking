@@ -4,7 +4,12 @@ import os
 from pathlib import Path
 from typing import Iterable
 
-SHARED_ENV_PATH = Path(os.environ.get("SRT_KTX_ENV_FILE", "/Users/ldh/.config/srt-ktx-auto-booking/.env"))
+SHARED_ENV_PATH = Path(
+    os.environ.get(
+        "SRT_KTX_ENV_FILE",
+        str(Path.home() / ".config" / "srt-ktx-auto-booking" / ".env"),
+    )
+)
 
 DEFAULT_ENV_CANDIDATES = (
     SHARED_ENV_PATH,
@@ -37,7 +42,7 @@ def parse_env_file(path: Path) -> dict[str, str]:
         value = value.strip()
         if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
             value = value[1:-1]
-        if is_placeholder_value(value):
+        if not value or is_placeholder_value(value):
             continue
         env[key] = value
     return env
