@@ -104,6 +104,23 @@ python3 scripts/ktx_booking.py reserve 서울 부산 20260328 090000 --train-id 
 python3 scripts/ktx_booking.py reservations
 ```
 
+### KTX 시간대 자동감시
+좌석이 있는 첫 열차를 찾아 일반실 우선으로 1석을 예약하고 Telegram으로 알립니다. 입석과 예약대기는 시도하지 않습니다.
+```bash
+python3 scripts/ktx_autobook_watch_window.py \
+  --state-dir ./state/ktx-window-20260815 \
+  --dep 서울 \
+  --arr 부산 \
+  --date 20260815 \
+  --start-time 150000 \
+  --end-time 180000
+```
+
+중지:
+```bash
+touch ./state/ktx-window-20260815/stop.flag
+```
+
 ### 취소
 ```bash
 python3 scripts/ktx_booking.py cancel <reservation_id>
