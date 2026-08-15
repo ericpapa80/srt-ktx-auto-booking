@@ -629,7 +629,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--end-time", required=True)
     parser.add_argument("--target-train-number")
     parser.add_argument("--target-dep-time")
-    parser.add_argument("--mode", choices=["target-total", "continuous-single"], default="target-total")
+    parser.add_argument(
+        "--mode",
+        choices=["target-total", "continuous-single", "additional-single"],
+        default="target-total",
+        help="target-total stops on an existing reservation; additional-single ignores existing reservations and stops after one new booking.",
+    )
     parser.add_argument(
         "--poll-sequence",
         type=parse_poll_sequence,

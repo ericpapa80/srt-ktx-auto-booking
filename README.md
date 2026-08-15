@@ -174,6 +174,8 @@ python3 scripts/srt_autobook_watcher.py \
   --notify stdout
 ```
 
+기존 예약이 있어도 좌석 1석을 추가로 한 번만 예약하려면 `--mode additional-single`을 사용합니다. 입석과 예약대기는 시도하지 않습니다.
+
 `srt_autobook_watcher.py` 도 현재 셸 환경변수 외에 `~/.config/srt-ktx-auto-booking/.env` 를 먼저 읽습니다.
 필요하면 `--secrets-path`로 다른 env 파일을 지정할 수 있습니다.
 
