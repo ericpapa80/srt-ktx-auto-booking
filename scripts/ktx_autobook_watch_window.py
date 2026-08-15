@@ -163,16 +163,19 @@ class WindowWatcher:
                     self.finish("done", "existing_reservation")
                     return 0
 
-                trains = client.search_train(
-                    self.args.dep,
-                    self.args.arr,
-                    self.args.date,
-                    self.args.start_time,
-                    train_type=kb.TRAIN_TYPE_MAP[self.args.train_type],
-                    passengers=kb.parse_passengers(self.args),
-                    include_no_seats=False,
-                    include_waiting_list=False,
-                )
+                try:
+                    trains = client.search_train(
+                        self.args.dep,
+                        self.args.arr,
+                        self.args.date,
+                        self.args.start_time,
+                        train_type=kb.TRAIN_TYPE_MAP[self.args.train_type],
+                        passengers=kb.parse_passengers(self.args),
+                        include_no_seats=False,
+                        include_waiting_list=False,
+                    )
+                except kb.NoResultsError:
+                    trains = []
                 candidates = [train for train in trains if in_window(train, self.args) and train.has_seat()]
                 candidates.sort(key=lambda train: (train.dep_time, int(train.train_no)))
                 if candidates:
